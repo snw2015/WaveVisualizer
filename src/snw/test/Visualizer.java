@@ -5,14 +5,20 @@ import snw.engine.component.EasyPaintable;
 import snw.engine.component.Paintable;
 import snw.engine.component.demo.NormalPanel;
 import snw.engine.core.Engine;
+import snw.file.FileIOHelper;
 import snw.math.VectorInt;
 import snw.slowfft.Complex;
 import snw.slowfft.DFTable;
 import snw.slowfft.Transformer;
 
 import javax.sound.sampled.*;
+import java.awt.datatransfer.UnsupportedFlavorException;
+import java.util.List;
 import javax.swing.*;
+import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.*;
+import java.awt.datatransfer.DataFlavor;
+import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
@@ -35,11 +41,11 @@ public class Visualizer extends NormalPanel {
 
     private Clip clip = null;
     private long flms = 0;
-    private int fl = 0;
+    private int fl = 1;
     private long fpms = 0;
     private int fp = 0;
     //NOTE: frame length could be long
-    private double[] freq = null;
+    private double[] freq = new double[WINDOW_LENGTH];
     private DFTable d = new Transformer();
     float[] wave = null;
     int iconNum;
@@ -58,25 +64,98 @@ public class Visualizer extends NormalPanel {
 
         Engine.setDecoder("mp3", new MP3Decoder());
 
-        Engine.storeBGM(NAME, FORMAT);
+        Engine.setMasterVol(0.5f);
 
-        clip = Engine.getClip(NAME);
-        AudioInputStream s = Engine.getStream(NAME, FORMAT);
-        fl = (int) s.getFrameLength();
-        flms = clip.getMicrosecondLength();
-        wave = getRawWave(s);
-        s.close();
+        playBGM(NAME, FORMAT);
 
-        freq = new double[WINDOW_LENGTH];
+        Engine.addTransferHandler("audio file input", new TransferHandler() {
+            @Override
+            public boolean canImport(TransferSupport support) {
+                if (!support.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) return false;
+                List<File> fileList;
+                try {
+                    try {
+                        fileList =
+                                (List<File>) support.getTransferable().getTransferData(DataFlavor.javaFileListFlavor);
+                    } catch (UnsupportedFlavorException e) {
+                        e.printStackTrace();
+                        return false;
+                    }
 
-        clip.addLineListener(event -> {
-            if (event.getType() == LineEvent.Type.STOP) {
-                Engine.playBGM(NAME, 1);
+                    if (!fileList.isEmpty() && fileList.size() == 1) {
+                        File file = fileList.get(0);
+                        String extension = FileIOHelper.getFileNameExtension(file);
+                        if (extension.equals("wav") || extension.equals("mp3"))
+                            return true;
+                    }
+
+                    return false;
+                } catch (IOException e) {
+                    e.printStackTrace();
+                } finally {
+                    return true;
+                }
+            }
+
+            @Override
+            public boolean importData(TransferSupport support) {
+                List<File> fileList;
+                try {
+                    fileList = (List<File>) support.getTransferable().getTransferData(DataFlavor.javaFileListFlavor);
+                } catch (UnsupportedFlavorException e) {
+                    e.printStackTrace();
+                    return false;
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    return false;
+                }
+                File file = fileList.get(0);
+                String format = FileIOHelper.getFileNameExtension(file);
+                String name = FileIOHelper.getFileNameStripped(file);
+                playBGM(name, format);
+
+                return true;
             }
         });
+    }
 
-        Engine.setMasterVol(0.5f);
-        Engine.playBGM(NAME, 1);
+    private boolean isPlaying = false;
+
+    private void playBGM(String newName, String format) {
+        String bgmName = Engine.getCurrentBGM();
+
+        if (bgmName != null) {
+            Engine.stopBGM();
+            Engine.releaseAudio(bgmName);
+        }
+
+        Engine.runNewThread(() -> {
+            fp = 0;
+            fl = 1;
+            isPlaying = false;
+            Engine.storeBGM(newName, format);
+
+            clip = Engine.getClip(newName);
+            AudioInputStream s = Engine.getStream(newName, format);
+            fl = (int) s.getFrameLength();
+            flms = clip.getMicrosecondLength();
+            try {
+                wave = getRawWave(s);
+                s.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+            clip.addLineListener(event -> {
+                if (event.getType() == LineEvent.Type.STOP) {
+                    clip.setFramePosition(0);
+                    clip.start();
+                }
+            });
+
+            Engine.playBGM(newName, 1);
+            isPlaying = true;
+        });
     }
 
     double ratio = 1000;
@@ -255,7 +334,12 @@ public class Visualizer extends NormalPanel {
     public void refresh() {
         super.refresh();
 
-        if (clip == null) return;
+        if (!isPlaying || clip == null) {
+            for (int i = 0; i < WINDOW_LENGTH; i++) {
+                freq[i] = 0;
+            }
+            return;
+        }
         fp = clip.getFramePosition();
         fpms = (long) ((double) fp / fl * flms);
         Complex[] windowedWave = new Complex[WINDOW_LENGTH];
